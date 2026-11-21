@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>WinExe</OutputType><UseWPF>true</UseWPF><AssemblyName>NearDrop-Setup</AssemblyName><ApplicationManifest>../Relay.App/app.manifest</ApplicationManifest></PropertyGroup>
+  <ItemGroup><ProjectReference Include="../Relay.Windows/Relay.Windows.csproj" /></ItemGroup>
+  <ItemGroup Condition="Exists('../../artifacts/payload.zip')">
+    <EmbeddedResource Include="../../artifacts/payload.zip" LogicalName="NearDrop.Payload" />
+    <EmbeddedResource Include="../../artifacts/payload.sha256" LogicalName="NearDrop.PayloadHash" />
+  </ItemGroup>
+</Project>

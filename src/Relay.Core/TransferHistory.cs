@@ -1,0 +1,48 @@
+using System.Globalization;
+
+namespace Relay.Core;
+
+public enum HistoryStatus { All, Active, AwaitingSave, Delivered, Attention, Stopped }
+public enum HistoryDirection { All, Outgoing, Incoming }
+
+public static class TransferHistory
+{
+    public static TransferJob[] Search(IEnumerable<TransferJob> jobs, string query, HistoryStatus status, HistoryDirection direction)
+    {
+        var terms = query.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        return jobs.Where(job => (status == HistoryStatus.All || StatusOf(job) == status)
+            && (direction == HistoryDirection.All || DirectionOf(job) == direction)
+            && terms.All(term => Matches(job, term)))
+            .OrderByDescending(job => job.Created).ToArray();
+    }
+
+    public static HistoryStatus StatusOf(TransferJob job)
+    {
+        if (job.Saved) return HistoryStatus.Delivered;
+        if (job.Error != null || job.State is "準備中斷，請重新選取來源傳送" or "朋友權限已撤銷") return HistoryStatus.Attention;
+        if (job.CanSave) return HistoryStatus.AwaitingSave;
+        if (job.Detached || job.Paused) return HistoryStatus.Stopped;
+        return job.Kind == "send" && job.State == TransferJob.SenderSynced ? HistoryStatus.Delivered : HistoryStatus.Active;
+    }
+
+    public static HistoryDirection DirectionOf(TransferJob job) => job.Kind switch
+    {
+        "send" or "watch-send" => HistoryDirection.Outgoing,
+        "receive" or "watch-receive" => HistoryDirection.Incoming,
+        _ => HistoryDirection.All
+    };
+
+    public static string DirectionLabel(TransferJob job) => job.Kind switch
+    {
+        "send" => "傳送",
+        "receive" => "接收",
+        "watch-send" => "持續傳送",
+        "watch-receive" => "持續接收",
+        _ => "其他工作"
+    };
+
+    private static bool Matches(TransferJob job, string term) =>
+        job.Label.Contains(term, StringComparison.OrdinalIgnoreCase) || job.FriendName.Contains(term, StringComparison.OrdinalIgnoreCase) ||
+        job.Created.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture).Contains(term, StringComparison.Ordinal) ||
+        job.Created.ToString("yyyy/MM/dd", CultureInfo.InvariantCulture).Contains(term, StringComparison.Ordinal);
+}

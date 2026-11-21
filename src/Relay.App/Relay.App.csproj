@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType><UseWPF>true</UseWPF><UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>NearDrop</AssemblyName><ApplicationManifest>app.manifest</ApplicationManifest>
+    <ImplicitUsings>disable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup><ProjectReference Include="../Relay.Windows/Relay.Windows.csproj" /></ItemGroup>
+  <ItemGroup><Content Include="../../vendor/syncthing-windows-amd64-v2.1.7/**/*" Link="engine/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" /></ItemGroup>
+  <ItemGroup><Content Include="../../docs/*" Link="docs/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" /><Content Include="../../LICENSE" Link="docs/LICENSE-NearDrop.txt" CopyToOutputDirectory="PreserveNewest" /></ItemGroup>
+</Project>
