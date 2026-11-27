@@ -40,24 +40,36 @@ public static class DeviceIdentity
 
 public sealed record Friend(string DeviceId, string Name, bool Connected, string Connection)
 {
-    public string Display => $"{Name}  ·  {(Connected ? (Connection.Contains("relay") ? "已連線 · 中繼" : "已連線 · 直接") : "離線／等待對方確認")}";
+    public bool Paused { get; init; }
+    public string ConnectionLabel => Connection switch
+    {
+        "tcp-client" or "tcp-server" => "TCP 直連",
+        "quic-client" or "quic-server" => "QUIC 直連",
+        "relay-client" or "relay-server" => "中繼",
+        _ => "連線方式未知"
+    };
+    public string Display => $"{Name}  ·  {(Paused ? "本機已暫停連線" : Connected ? $"已連線 · {ConnectionLabel}" : "未連線")}";
 }
 
 public sealed class PairingService(ITransferEngine engine)
 {
-    public async Task AddAsync(string id, string name, bool identityVerified, string[]? addresses = null)
+    public async Task<bool> AddAsync(string id, string name, bool identityVerified, string[]? addresses = null)
     {
         if (!identityVerified) throw new InvalidOperationException("請先透過可信管道核對雙方完整裝置 ID。");
         id = DeviceIdentity.Normalize(id);
         if (id == engine.DeviceId) throw new ArgumentException("這是你自己的裝置。");
         if (string.IsNullOrWhiteSpace(name) || name.Length > 80) throw new ArgumentException("請填寫 1～80 字的朋友名稱。");
-        var template = await engine.GetAsync("config/defaults/device");
-        template["deviceID"] = id;
-        template["name"] = name.Trim();
-        template["addresses"] = new JsonArray((addresses ?? ["dynamic"]).Select(a => JsonValue.Create(a)).ToArray());
-        template["introducer"] = false;
-        template["autoAcceptFolders"] = false;
-        await engine.WriteAsync("config/devices", template);
+        var devices = (await engine.ReadAsync("config/devices"))!.AsArray();
+        var existing = devices.OfType<JsonObject>().FirstOrDefault(device => device["deviceID"]?.GetValue<string>() == id);
+        var device = existing ?? await engine.GetAsync("config/defaults/device");
+        device["deviceID"] = id;
+        device["name"] = name.Trim();
+        if (existing == null || addresses != null)
+            device["addresses"] = new JsonArray((addresses ?? ["dynamic"]).Select(a => JsonValue.Create(a)).ToArray());
+        device["introducer"] = false;
+        device["autoAcceptFolders"] = false;
+        await engine.WriteAsync("config/devices", device);
+        return existing == null;
     }
 
     public async Task<IReadOnlyList<Friend>> ListAsync()
@@ -68,7 +80,10 @@ public sealed class PairingService(ITransferEngine engine)
         {
             var id = d!["deviceID"]!.GetValue<string>();
             var c = connections[id];
-            return new Friend(id, d["name"]?.GetValue<string>() ?? id, c?["connected"]?.GetValue<bool>() == true, c?["type"]?.GetValue<string>() ?? "");
+            return new Friend(id, d["name"]?.GetValue<string>() ?? id, c?["connected"]?.GetValue<bool>() == true, c?["type"]?.GetValue<string>() ?? "")
+            {
+                Paused = c?["paused"]?.GetValue<bool>() ?? d["paused"]?.GetValue<bool>() ?? false
+            };
         }).ToArray();
     }
 

@@ -3,6 +3,7 @@ using System.IO.Compression;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.Win32;
 using Relay.Core;
 using Relay.Windows;
@@ -11,32 +12,55 @@ namespace Relay.Setup;
 
 public sealed class InstallRecord
 {
+    [JsonRequired]
     public string Product { get; set; } = "NearDrop-7fb06d16";
     public string Version { get; set; } = typeof(InstallRecord).Assembly.GetName().Version!.ToString(3);
+    [JsonRequired]
     public List<string> Files { get; set; } = [];
 }
 public sealed class Installer(string directory, bool isolated)
 {
-    public string DirectoryPath { get; } = Path.GetFullPath(directory);
+    public string DirectoryPath { get; } = Path.TrimEndingDirectorySeparator(Path.GetFullPath(directory));
     private string RecordPath => Path.Combine(DirectoryPath, "neardrop-install.json");
     private const string UninstallKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\NearDrop";
-    private void CheckTarget()
+    private void CheckTarget(bool uninstall = false)
     {
+        var root = Path.GetPathRoot(DirectoryPath)!;
+        if (root == DirectoryPath || DirectoryPath.StartsWith(@"\\", StringComparison.Ordinal) || new DriveInfo(root).DriveType == DriveType.Network)
+            throw new IOException("請選擇本機磁碟中的專用安裝資料夾。");
         SafePaths.NoLinks(DirectoryPath);
-        if (Path.GetPathRoot(DirectoryPath) == DirectoryPath || DirectoryPath.StartsWith("\\\\")) throw new IOException("安裝位置需為本機的專用資料夾。");
-        if (Directory.Exists(DirectoryPath) && Directory.EnumerateFileSystemEntries(DirectoryPath).Any() && !File.Exists(RecordPath))
-            throw new IOException("安裝位置不是空白的專用資料夾，已停止以保留現有內容。");
-        if (File.Exists(RecordPath) && ReadRecord().Product != "NearDrop-7fb06d16") throw new IOException("安裝紀錄不符。");
+        if (File.Exists(RecordPath))
+        {
+            if (ReadRecord().Product != "NearDrop-7fb06d16") throw new IOException("安裝紀錄與 NearDrop 不符。");
+        }
+        else
+        {
+            if (uninstall) throw new IOException("找不到 NearDrop 的安裝紀錄。這次移除未變更任何檔案。");
+            if (Directory.Exists(DirectoryPath) && Directory.EnumerateFileSystemEntries(DirectoryPath).Any())
+                throw new IOException("請選擇空白的專用安裝資料夾。現有內容已保留。");
+        }
         foreach (var process in Process.GetProcessesByName("NearDrop"))
         {
             using (process)
             {
-                try { if (process.MainModule?.FileName == Path.Combine(DirectoryPath, "NearDrop.exe")) throw new IOException("請先從 NearDrop 系統匣退出並停止背景傳輸，再進行安裝或移除。"); }
+                try { if (string.Equals(process.MainModule?.FileName, Path.Combine(DirectoryPath, "NearDrop.exe"), StringComparison.OrdinalIgnoreCase)) throw new IOException("請先從 NearDrop 系統匣退出並停止背景傳輸，再進行安裝或移除。"); }
                 catch (System.ComponentModel.Win32Exception) { /* Another user's process cannot use our private install. */ }
             }
         }
     }
-    private InstallRecord ReadRecord() => JsonSerializer.Deserialize<InstallRecord>(File.ReadAllText(RecordPath)) ?? throw new IOException("安裝紀錄已損壞。");
+    private InstallRecord ReadRecord()
+    {
+        SafePaths.NoLinks(RecordPath);
+        try
+        {
+            var record = JsonSerializer.Deserialize<InstallRecord>(File.ReadAllText(RecordPath));
+            if (record?.Files == null || !record.Files.Contains("Uninstall.exe", StringComparer.OrdinalIgnoreCase))
+                throw new IOException("安裝紀錄不完整，無法確認這次安裝的檔案。");
+            foreach (var relative in record.Files) SafePaths.Relative(DirectoryPath, relative);
+            return record;
+        }
+        catch (JsonException e) { throw new IOException("安裝紀錄已損壞，無法確認這次安裝的檔案。", e); }
+    }
     public async Task InstallAsync(Action<string> progress)
     {
         CheckTarget();
@@ -70,7 +94,10 @@ public sealed class Installer(string directory, bool isolated)
         // Persist the owned-file inventory first. Interrupted install can be repaired by rerunning.
         record.Files.Add("Uninstall.exe");
         if (File.Exists(RecordPath)) record.Files = record.Files.Union(ReadRecord().Files, StringComparer.OrdinalIgnoreCase).ToList();
-        await File.WriteAllTextAsync(RecordPath, JsonSerializer.Serialize(record));
+        var stagedRecord = Path.Combine(stage, "install-record.json");
+        await File.WriteAllTextAsync(stagedRecord, JsonSerializer.Serialize(record));
+        SafePaths.NoLinks(RecordPath);
+        File.Move(stagedRecord, RecordPath, overwrite: true);
         foreach (var relative in record.Files.Where(f => f != "Uninstall.exe"))
         {
             var source = SafePaths.Relative(extracted, relative);
@@ -78,7 +105,7 @@ public sealed class Installer(string directory, bool isolated)
             var target = SafePaths.Relative(DirectoryPath, relative);
             Directory.CreateDirectory(Path.GetDirectoryName(target)!); File.Copy(source, target, true);
         }
-        File.Copy(Environment.ProcessPath!, Path.Combine(DirectoryPath, "Uninstall.exe"), true);
+        File.Copy(Environment.ProcessPath!, SafePaths.Relative(DirectoryPath, "Uninstall.exe"), true);
         if (!isolated)
         {
             progress("正在建立開始功能表捷徑…");
@@ -100,18 +127,17 @@ public sealed class Installer(string directory, bool isolated)
     }
     public Task UninstallAsync() => Task.Run(() =>
     {
-        CheckTarget();
-        if (!File.Exists(RecordPath)) throw new IOException("找不到安裝紀錄，不會刪除任何檔案。");
+        CheckTarget(uninstall: true);
         var record = ReadRecord();
         var ownedDirectories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var relative in record.Files)
         {
+            if (string.Equals(relative, "Uninstall.exe", StringComparison.OrdinalIgnoreCase)) continue;
             var path = SafePaths.Relative(DirectoryPath, relative);
             if (File.Exists(path)) File.Delete(path);
             for (var parent = Path.GetDirectoryName(path); parent != null && SafePaths.Within(parent, DirectoryPath); parent = Path.GetDirectoryName(parent))
                 ownedDirectories.Add(parent);
         }
-        File.Delete(RecordPath);
         if (!isolated)
         {
             RemoveShortcut(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), "NearDrop.lnk"));
@@ -122,6 +148,9 @@ public sealed class Installer(string directory, bool isolated)
             if (uninstall?.GetValue("InstallLocation") as string == DirectoryPath) Registry.CurrentUser.DeleteSubKey(UninstallKey, false);
         }
         foreach (var path in ownedDirectories.OrderByDescending(p => p.Length)) DeleteIfEmpty(path);
+        // Keep the entry point and file list available while removal may still fail.
+        File.Delete(SafePaths.Relative(DirectoryPath, "Uninstall.exe"));
+        File.Delete(RecordPath);
         DeleteIfEmpty(DirectoryPath);
         // Never touch %LOCALAPPDATA%/NearDrop/Data, received files, queue snapshots or backups.
     });

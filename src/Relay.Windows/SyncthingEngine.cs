@@ -9,6 +9,8 @@ using Relay.Core;
 
 namespace Relay.Windows;
 
+public sealed class EngineRestoreException(string message, Exception cause) : IOException(message, cause) { }
+
 public sealed class SyncthingEngine : ITransferEngine, IAsyncDisposable
 {
     public const string Version = "2.1.7";
@@ -134,7 +136,12 @@ public sealed class SyncthingEngine : ITransferEngine, IAsyncDisposable
             }
             throw new TimeoutException("傳輸引擎沒有回應，請檢查防毒軟體或重新啟動。");
         }
-        catch { await DisposeAsync(); throw; }
+        catch
+        {
+            if (resume) await StopChildAsync();
+            else await DisposeAsync();
+            throw;
+        }
     }
 
     private Process StartProcess(string[] args)
@@ -179,8 +186,28 @@ public sealed class SyncthingEngine : ITransferEngine, IAsyncDisposable
     public async Task WithStoppedAsync(Func<Task> operation)
     {
         await StopChildAsync();
+        Exception? operationError = null;
         try { await operation(); }
-        finally { await StartInternalAsync(true); }
+        catch (Exception e) { operationError = e; throw; }
+        finally
+        {
+            try
+            {
+                try { await StartInternalAsync(true); }
+                catch (Exception e) when (e is IOException or TimeoutException)
+                {
+                    // Allow Windows to release the prior process's file and socket handles.
+                    await Task.Delay(300);
+                    await StartInternalAsync(true);
+                }
+            }
+            catch (Exception e)
+            {
+                const string message = "背景傳輸引擎未能恢復。請從系統匣退出後重新開啟 NearDrop。";
+                if (operationError == null) throw new EngineRestoreException(message, e);
+                throw new EngineRestoreException(operationError.Message + "\n" + message, new AggregateException(operationError, e));
+            }
+        }
     }
     private async Task StopChildAsync()
     {

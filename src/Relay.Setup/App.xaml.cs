@@ -50,7 +50,7 @@ public partial class App : Application
                 var result = Array.IndexOf(e.Args, "--result");
                 if (result >= 0 && result + 1 < e.Args.Length) File.WriteAllText(e.Args[result + 1], error.ToString());
             }
-            else MessageBox.Show(error.Message, "NearDrop 安裝未完成");
+            else MessageBox.Show(error.Message, e.Args.Contains("--uninstall") ? "NearDrop 移除未完成" : "NearDrop 安裝未完成");
             Shutdown(1);
         }
     }

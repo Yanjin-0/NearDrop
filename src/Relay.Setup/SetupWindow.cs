@@ -23,18 +23,35 @@ public sealed class SetupWindow : Window
         var finished = false; var working = false;
         button.Click += async (_, _) =>
         {
-            if (finished) { if (!uninstall) Process.Start(new ProcessStartInfo(Path.Combine(installer.DirectoryPath, "NearDrop.exe")) { UseShellExecute = false }); Application.Current.Shutdown(); return; }
+            if (finished)
+            {
+                try
+                {
+                    if (!uninstall) Process.Start(new ProcessStartInfo(Path.Combine(installer.DirectoryPath, "NearDrop.exe")) { UseShellExecute = false });
+                    Application.Current.Shutdown();
+                }
+                catch (Exception error)
+                {
+                    message.Text = "安裝已完成，但無法開啟 NearDrop。\n" + error.Message;
+                    button.Content = "重試開啟 NearDrop";
+                }
+                return;
+            }
             working = true; button.IsEnabled = false; progress.Visibility = Visibility.Visible;
             try
             {
-                if (uninstall) { await installer.UninstallAsync(); message.Text = "程式已移除，個人檔案與裝置設定皆已保留。"; }
+                if (uninstall) { await installer.UninstallAsync(); message.Text = "程式已移除。NearDrop 的收件、暫存與裝置設定已保留。"; }
                 else await installer.InstallAsync(text => message.Text = text);
                 finished = true; button.Content = uninstall ? "完成" : "開啟 NearDrop";
             }
-            catch (Exception error) { message.Text = error.Message; }
+            catch (Exception error)
+            {
+                message.Text = (uninstall ? "移除未完成。" : "安裝未完成。") + "\n" + error.Message;
+                button.Content = uninstall ? "重試移除" : "重試安裝";
+            }
             finally { working = false; progress.Visibility = Visibility.Collapsed; button.IsEnabled = true; }
         };
-        panel.Children.Add(button); Content = panel;
+        panel.Children.Add(button); Content = new ScrollViewer { Content = panel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
         Closing += (_, e) => { if (working) e.Cancel = true; else Application.Current.Shutdown(); };
     }
 }

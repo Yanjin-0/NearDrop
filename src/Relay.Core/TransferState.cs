@@ -8,7 +8,15 @@ public sealed class TransferJob : INotifyPropertyChanged
     private string? lastHistoryDisplay;
     public event PropertyChangedEventHandler? PropertyChanged;
     public const string AwaitingSave = "已接收 · 等待獨立保存";
+    public const string DetachedAwaitingSave = "已停止共享 · 待獨立保存";
     public const string SenderSynced = "對方已同步 · 保存狀態未知";
+    public const string PreparationInterrupted = "準備中斷，請重新選取來源傳送";
+    public const string PreparationFailed = "暫存未完成 · 請重新選取來源傳送";
+    public const string ShareMissing = "本機共享設定不存在";
+    public const string FriendAccessRevoked = "朋友權限已撤銷";
+    public const string SaveFailed = "獨立保存失敗 · 可重試";
+    public const string SaveInterrupted = "獨立保存中斷 · 可重試";
+    public const string SaveRejected = "收件完整性驗證未通過 · 請對方重新傳送";
     public string Id { get; set; } = "";
     public string FriendId { get; set; } = "";
     public string FriendName { get; set; } = "";
@@ -22,6 +30,7 @@ public sealed class TransferJob : INotifyPropertyChanged
     public bool Detached { get; set; }
     public bool CleanupStarted { get; set; }
     public bool OutboxRemoved { get; set; }
+    public bool PeerSyncConfirmed { get; set; }
     public string? SavedPath { get; set; }
     public long TotalBytes { get; set; }
     public long DoneBytes { get; set; }
@@ -38,7 +47,21 @@ public sealed class TransferJob : INotifyPropertyChanged
         PropertyChanged?.Invoke(this, new(nameof(HistoryDisplay)));
     }
     [System.Text.Json.Serialization.JsonIgnore]
-    public bool CanSave => Kind == "receive" && !Saved && (State == AwaitingSave || SavedPath != null);
+    public bool IsAwaitingFirstSave => Kind == "receive" && !Saved &&
+        (Detached ? State == DetachedAwaitingSave : State == AwaitingSave);
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool CanSave => Kind == "receive" && !Saved && State != SaveRejected &&
+        (IsAwaitingFirstSave || SavedPath != null || !Detached && State == SaveFailed);
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool HasConfirmedPeerSync => Kind == "send" && (PeerSyncConfirmed || State == SenderSynced);
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool CanRetry => !Saved && !CleanupStarted && !HasConfirmedPeerSync && State is not (PreparationInterrupted or PreparationFailed) &&
+        !(Kind == "receive" && (Detached || CanSave));
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool CanStop => !Saved && !Detached && SavedPath == null;
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool CanToggleWatch => Kind is ("watch-send" or "watch-receive") && CanStop &&
+        State is not (ShareMissing or FriendAccessRevoked);
     [System.Text.Json.Serialization.JsonIgnore]
     public string Display
     {
@@ -46,11 +69,12 @@ public sealed class TransferJob : INotifyPropertyChanged
         {
             var displayState = State == AwaitingSave ? "待保存 · 接收已完成" : Saved ? "已保存到收件資料夾" : State;
             var details = $"{Label}  ·  {FriendName}\n{displayState}{(Error == null ? "" : " · " + Error)}";
-            if (Saved) return details + "\n" + Format(TotalBytes);
-            if (TotalBytes <= 0) return details;
-            var speed = RecentBytesPerSecond > 0 && State.StartsWith("傳輸中", StringComparison.Ordinal)
+            if (HasConfirmedPeerSync && State != SenderSynced) details += "\n先前已確認對方同步 · 保存狀態未知";
+            if (Saved || OutboxRemoved || TotalBytes <= 0) return details;
+            var speed = RecentBytesPerSecond > 0 && State.StartsWith("正在同步", StringComparison.Ordinal)
                 ? $" · {Format((long)RecentBytesPerSecond)}/s" : "";
-            return $"{details}\n{Format(DoneBytes)} / {Format(TotalBytes)} · {Math.Clamp(100d * DoneBytes / TotalBytes, 0, 100):0}%{speed}";
+            var percent = DoneBytes >= TotalBytes ? 100 : Math.Clamp(Math.Floor(100d * DoneBytes / TotalBytes), 0, 99);
+            return $"{details}\n同步資料量 {Format(DoneBytes)} / {Format(TotalBytes)} · {percent:0}%{speed}";
         }
     }
     public static string Format(long bytes) => bytes >= 1073741824 ? $"{bytes / 1073741824d:0.00} GB" : bytes >= 1048576 ? $"{bytes / 1048576d:0.0} MB" : bytes >= 1024 ? $"{bytes / 1024d:0.0} KB" : $"{bytes} B";

@@ -7,15 +7,21 @@ namespace Relay.Windows;
 public static class ExplorerIntegration
 {
     private const string StartupKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+    private static string StartupCommand => '"' + Environment.ProcessPath! + "\" --background";
     public static bool StartupEnabled
     {
-        get { using var key = Registry.CurrentUser.OpenSubKey(StartupKey); return key?.GetValue("NearDrop") != null; }
+        get
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(StartupKey);
+            return string.Equals(key?.GetValue("NearDrop") as string, StartupCommand, StringComparison.OrdinalIgnoreCase);
+        }
     }
     public static void SetStartup(bool enabled)
     {
         using var key = Registry.CurrentUser.CreateSubKey(StartupKey);
-        if (enabled) key.SetValue("NearDrop", '"' + Environment.ProcessPath! + "\" --background");
-        else key.DeleteValue("NearDrop", false);
+        if (enabled) key.SetValue("NearDrop", StartupCommand);
+        else if (string.Equals(key.GetValue("NearDrop") as string, StartupCommand, StringComparison.OrdinalIgnoreCase))
+            key.DeleteValue("NearDrop", false);
     }
     public static void InstallSendTo()
     {

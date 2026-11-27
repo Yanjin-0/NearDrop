@@ -32,7 +32,7 @@ internal static class Program
         direction.SelectedIndex = (int)HistoryDirection.Outgoing;
         Check(history.Items.Count == 2, "方向篩選與複合查詢可同時使用");
         status.SelectedIndex = (int)HistoryStatus.Delivered;
-        Check(history.Items.Count == 1 && ((TransferJob)history.Items[0]).Id == "old", "已接收／已保存篩選包含同步完成但保留未知保存狀態");
+        Check(history.Items.Count == 1 && ((TransferJob)history.Items[0]).Id == "old", "已同步／已獨立保存篩選保留發送端的保存狀態未知");
         Check(((TransferJob)history.Items[0]).HistoryDisplay.Contains("保存狀態未知", StringComparison.Ordinal), "發送端仍清楚標明保存狀態未知");
         history.SelectedIndex = 0;
         search.Text = "Alice";
@@ -57,6 +57,56 @@ internal static class Program
         displayed.RefreshHistoryDisplay();
         displayed.RefreshHistoryDisplay();
         Check(notifications == 1, "只在顯示內容有變動時更新既有清單列");
+
+        var incoming = Control<ListBox>(window, "Incoming");
+        var openReceivedWatch = Control<Button>(window, "OpenReceivedWatchButton");
+        var openReceived = Control<Button>(window, "OpenReceivedButton");
+        var localPath = Control<TextBox>(window, "IncomingLocalPath");
+        incoming.ItemsSource = jobs.Where(job => job.Kind.EndsWith("receive", StringComparison.Ordinal));
+        var synced = jobs.Single(job => job.Id == "sync");
+        synced.Path = Path.Combine(profile, "Incoming", synced.Id);
+        incoming.SelectedItem = synced;
+        Check(openReceivedWatch.IsEnabled && openReceivedWatch.Visibility == Visibility.Visible && !openReceived.IsEnabled && localPath.Text == synced.Path,
+            "持續同步收件可開啟其本機同步資料夾");
+        var saved = jobs.Single(job => job.Id == "saved");
+        saved.SavedPath = Path.Combine(profile, "Received", saved.Id);
+        saved.TotalBytes = 329;
+        incoming.SelectedItem = saved;
+        Check(openReceivedWatch.Visibility == Visibility.Collapsed && openReceived.IsEnabled && localPath.Text == Path.Combine(saved.SavedPath, "Files"),
+            "單次保存收件直接顯示檔案所在資料夾");
+        Check(!saved.Display.Contains("329 B", StringComparison.Ordinal), "保存收件不把含清單的同步容量顯示為檔案大小");
+        var pendingSave = jobs.Single(job => job.Id == "pending");
+        pendingSave.SavedPath = Path.Combine(profile, "Received", pendingSave.Id);
+        pendingSave.State = TransferJob.SaveFailed;
+        pendingSave.Error = "測試保存錯誤";
+        incoming.SelectedItem = pendingSave;
+        Check((string)Control<Button>(window, "SaveButton").Content == "重試獨立保存" &&
+            localPath.Text == pendingSave.SavedPath && TransferHistory.StatusOf(pendingSave) == HistoryStatus.Attention,
+            "保存失敗顯示重試動作、原目的地與需要處理狀態");
+        pendingSave.State = TransferJob.SaveRejected;
+        incoming.SelectedItem = null;
+        incoming.SelectedItem = pendingSave;
+        Check(Control<Button>(window, "SaveButton").Visibility == Visibility.Collapsed &&
+            Control<TextBlock>(window, "IncomingHint").Text.Contains("新的傳送邀請", StringComparison.Ordinal),
+            "內容驗證拒絕時改提示重送");
+        pendingSave.State = "已停止共享 · 本機檔案保留";
+        pendingSave.SavedPath = null;
+        pendingSave.Detached = true;
+        incoming.SelectedItem = null;
+        incoming.SelectedItem = pendingSave;
+        Check(!pendingSave.CanSave && !pendingSave.CanRetry &&
+            Control<TextBlock>(window, "IncomingHint").Text.Contains("新的傳送邀請", StringComparison.Ordinal),
+            "停止的單次收件提示對方需建立新邀請");
+
+        var watches = Control<ListBox>(window, "Watches");
+        var openWatch = Control<Button>(window, "OpenWatchButton");
+        watches.ItemsSource = jobs.Where(job => job.Kind.StartsWith("watch", StringComparison.Ordinal));
+        Check(!openWatch.IsEnabled, "未選取持續同步工作時不開啟資料夾");
+        watches.SelectedItem = jobs.Single(job => job.Id == "sync");
+        Check(openWatch.IsEnabled, "可從自動傳送頁開啟收件同步資料夾");
+        watches.SelectedItem = jobs.Single(job => job.Id == "paused");
+        Check(openWatch.IsEnabled, "可開啟已暫停工作的本機同步資料夾");
+
         Check(!window.IsVisible && new WindowInteropHelper(window).Handle == IntPtr.Zero, "測試全程沒有顯示視窗或建立原生視窗控制代碼");
         Console.WriteLine("Headless UI fixtures: " + profile);
     }
@@ -81,7 +131,7 @@ internal static class Program
             new() { Id = "saved", Label = "已保存相片", FriendName = "Bob", Kind = "receive", Saved = true, Detached = true, Created = date },
             new() { Id = "paused", Label = "暫停資料夾", Kind = "watch-send", Paused = true, Created = date },
             new() { Id = "failed", Label = "清理未完成", Kind = "send", Error = "檔案鎖定", Detached = true, Created = date },
-            new() { Id = "sync", Label = "監控資料夾", Kind = "watch-receive", State = "目前已同步 · 持續監控", Created = date }
+            new() { Id = "sync", Label = "監控資料夾", Kind = "watch-receive", State = "已同步至目前收到的版本 · 持續接收", Created = date }
         ];
     }
 }

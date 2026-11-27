@@ -7,6 +7,8 @@ namespace Relay.Windows;
 
 public sealed class SingleInstance : IDisposable
 {
+    private const int MaxPaths = 4096;
+    private const int MaxPayloadBytes = 1024 * 1024;
     private readonly string pipeName;
     private FileStream? ownership;
     private readonly CancellationTokenSource stop = new();
@@ -23,10 +25,21 @@ public sealed class SingleInstance : IDisposable
     }
     public async Task ForwardAsync(string[] paths)
     {
+        if (paths.Length > MaxPaths) throw new IOException("啟動中的 NearDrop 一次最多可接收 4,096 個選取項目。請分批加入。");
+        var payload = JsonSerializer.SerializeToUtf8Bytes(paths);
+        if (payload.Length > MaxPayloadBytes) throw new IOException("選取項目的路徑資料過大。請分批加入。");
         await using var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.Out, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
         using var timeout = new CancellationTokenSource(3000);
-        await pipe.ConnectAsync(timeout.Token);
-        await JsonSerializer.SerializeAsync(pipe, paths, cancellationToken: timeout.Token); await pipe.FlushAsync(timeout.Token);
+        try
+        {
+            await pipe.ConnectAsync(timeout.Token);
+            await pipe.WriteAsync(payload, timeout.Token);
+            await pipe.FlushAsync(timeout.Token);
+        }
+        catch (Exception e) when (e is IOException or OperationCanceledException)
+        {
+            throw new IOException("無法將這次操作交給已啟動的 NearDrop。請切換到原本的視窗後重試。", e);
+        }
     }
     public void Listen(Action<string[]> onPaths)
     {
@@ -42,11 +55,11 @@ public sealed class SingleInstance : IDisposable
                     using var data = new MemoryStream(); var buffer = new byte[8192]; int count;
                     while ((count = await pipe.ReadAsync(buffer, readTimeout.Token)) > 0)
                     {
-                        if (data.Length + count > 1024 * 1024) throw new IOException("Too many selected paths");
+                        if (data.Length + count > MaxPayloadBytes) throw new IOException("選取項目的路徑資料過大。");
                         data.Write(buffer, 0, count);
                     }
                     var paths = JsonSerializer.Deserialize<string[]>(data.ToArray());
-                    if (paths != null && paths.Length <= 4096) onPaths(paths);
+                    if (paths != null && paths.Length <= MaxPaths) onPaths(paths);
                 }
                 catch (Exception e) when (e is IOException or JsonException or OperationCanceledException) { }
             }

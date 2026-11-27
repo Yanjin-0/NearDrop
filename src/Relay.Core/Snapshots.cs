@@ -6,20 +6,34 @@ namespace Relay.Core;
 public sealed record ManifestEntry(string Path, long Length, string Sha256, bool Directory);
 public sealed record SnapshotManifest(int Version, string TransferId, List<ManifestEntry> Entries);
 public sealed record SnapshotProgress(string FileName, int FilesCopied, long BytesCopied, long FileBytesCopied, long FileLength);
+public sealed class SnapshotIntegrityException(string message, Exception? cause = null) : IOException(message, cause) { }
 
 public static class Snapshots
 {
     public const string ManifestName = "neardrop-manifest.json";
     public const int MaxEntries = 100000;
     public const int MaxManifestBytes = 24 * 1024 * 1024;
+    public static string? FindConflictingTopLevelName(IEnumerable<string> paths)
+    {
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var path in paths.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            var name = Path.GetFileName(Path.TrimEndingDirectorySeparator(path));
+            if (!names.Add(name)) return name;
+        }
+        return null;
+    }
     public static async Task<long> CreateAsync(string[] sources, string destination, string transferId, CancellationToken ct = default,
         IProgress<SnapshotProgress>? progress = null)
     {
         ct.ThrowIfCancellationRequested();
+        var normalized = sources.Select(path => Path.TrimEndingDirectorySeparator(Path.GetFullPath(path)))
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        if (FindConflictingTopLevelName(normalized) is string conflict)
+            throw new IOException($"有多個項目名為「{conflict}」。請分批傳送。");
         Directory.CreateDirectory(destination);
         var payload = Path.Combine(destination, "Files"); Directory.CreateDirectory(payload);
         var entries = new List<ManifestEntry>();
-        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         long bytes = 0;
         int files = 0;
         var progressClock = progress == null ? null : System.Diagnostics.Stopwatch.StartNew();
@@ -29,12 +43,11 @@ public static class Snapshots
             progress!.Report(new(file, files, bytes + copied, copied, length));
             progressClock.Restart();
         }
-        foreach (var source in sources.Select(Path.GetFullPath).Distinct(StringComparer.OrdinalIgnoreCase))
+        foreach (var source in normalized)
         {
             SafePaths.NoLinks(source);
             if (SafePaths.Overlap(source, destination)) throw new IOException("傳送來源不能包含暫存目錄。");
             var top = Path.GetFileName(Path.TrimEndingDirectorySeparator(source));
-            if (!names.Add(top)) throw new IOException("所選項目含相同名稱，請分開傳送。");
             var items = Directory.Exists(source) ? new[] { source }.Concat(SafePaths.Walk(source)) : new[] { source };
             foreach (var item in items)
             {
@@ -77,31 +90,34 @@ public static class Snapshots
     {
         SafePaths.NoLinks(root);
         var manifestPath = SafePaths.Relative(root, ManifestName);
-        if (new FileInfo(manifestPath).Length > MaxManifestBytes) throw new IOException("收件清單超過安全上限。");
-        var manifest = JsonSerializer.Deserialize<SnapshotManifest>(await File.ReadAllTextAsync(manifestPath, ct)) ?? throw new IOException("收件清單損壞。");
-        if (manifest.Version != 1 || manifest.TransferId != id || manifest.Entries == null || manifest.Entries.Count > MaxEntries)
-            throw new IOException("收件清單不相符。");
+        if (new FileInfo(manifestPath).Length > MaxManifestBytes) throw new SnapshotIntegrityException("檔案清單超過安全上限。");
+        SnapshotManifest? manifest;
+        try { manifest = JsonSerializer.Deserialize<SnapshotManifest>(await File.ReadAllTextAsync(manifestPath, ct)); }
+        catch (JsonException e) { throw new SnapshotIntegrityException("檔案清單無法讀取。", e); }
+        if (manifest?.Version != 1 || manifest.TransferId != id || manifest.Entries == null || manifest.Entries.Count is 0 or > MaxEntries)
+            throw new SnapshotIntegrityException("檔案清單與這筆工作不相符。");
         var expected = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var payload = SafePaths.Relative(root, "Files");
         foreach (var item in Directory.EnumerateFileSystemEntries(root))
         {
             SafePaths.NoLinks(item);
             if (Path.GetFileName(item) is not ("Files" or ManifestName or ".stfolder"))
-                throw new IOException("收件根目錄包含清單以外的內容。");
+                throw new SnapshotIntegrityException("資料夾包含清單以外的內容。");
             if (Path.GetFileName(item) == ".stfolder" && Directory.EnumerateFileSystemEntries(item).Any())
-                throw new IOException("收件標記目錄包含未預期內容。");
+                throw new SnapshotIntegrityException("同步標記目錄包含未預期內容。");
         }
         foreach (var entry in manifest.Entries)
         {
+            if (entry == null || string.IsNullOrEmpty(entry.Path)) throw new SnapshotIntegrityException("檔案清單缺少有效項目。");
             var path = SafePaths.Relative(payload, entry.Path);
-            if (!expected.Add(path)) throw new IOException("收件清單出現重複路徑。");
-            if (entry.Directory) { if (!Directory.Exists(path)) throw new IOException("缺少目錄。"); continue; }
+            if (!expected.Add(path)) throw new SnapshotIntegrityException("檔案清單出現重複路徑。");
+            if (entry.Directory) { if (!Directory.Exists(path)) throw new SnapshotIntegrityException("缺少清單中的資料夾。"); continue; }
             await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 128 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
             if (stream.Length != entry.Length || Convert.ToHexString(await SHA256.HashDataAsync(stream, ct)) != entry.Sha256)
-                throw new IOException("檔案完整性驗證失敗：" + entry.Path);
+                throw new SnapshotIntegrityException("檔案完整性驗證失敗：" + entry.Path);
         }
         foreach (var item in SafePaths.Walk(payload))
-            if (!expected.Contains(item)) throw new IOException("收到不在清單內的內容，已停止保存。");
+            if (!expected.Contains(item)) throw new SnapshotIntegrityException("檔案與清單內容不相符。");
         // No incoming metadata or executable is opened; add Windows Internet Zone marking.
         foreach (var entry in manifest.Entries.Where(e => !e.Directory))
         {

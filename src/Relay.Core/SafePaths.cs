@@ -33,8 +33,14 @@ public static partial class SafePaths
         if (!Within(full, root)) throw new IOException("路徑超出允許範圍。");
         NoLinks(full); return full;
     }
-    public static bool Within(string path, string root) =>
-        Path.GetFullPath(path).StartsWith(Path.TrimEndingDirectorySeparator(Path.GetFullPath(root)) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+    public static bool Within(string path, string root)
+    {
+        var fullPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+        var fullRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
+        if (string.Equals(fullPath, fullRoot, StringComparison.OrdinalIgnoreCase)) return false;
+        var prefix = Path.EndsInDirectorySeparator(fullRoot) ? fullRoot : fullRoot + Path.DirectorySeparatorChar;
+        return fullPath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
+    }
     public static bool Overlap(string a, string b) => string.Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(a)), Path.TrimEndingDirectorySeparator(Path.GetFullPath(b)), StringComparison.OrdinalIgnoreCase) || Within(a, b) || Within(b, a);
     public static IEnumerable<string> Walk(string directory)
     {

@@ -10,7 +10,8 @@ public static class TransferHistory
     public static TransferJob[] Search(IEnumerable<TransferJob> jobs, string query, HistoryStatus status, HistoryDirection direction)
     {
         var terms = query.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        return jobs.Where(job => (status == HistoryStatus.All || StatusOf(job) == status)
+        return jobs.Where(job => (status == HistoryStatus.All || StatusOf(job) == status ||
+                status == HistoryStatus.Delivered && job.HasConfirmedPeerSync)
             && (direction == HistoryDirection.All || DirectionOf(job) == direction)
             && terms.All(term => Matches(job, term)))
             .OrderByDescending(job => job.Created).ToArray();
@@ -19,10 +20,12 @@ public static class TransferHistory
     public static HistoryStatus StatusOf(TransferJob job)
     {
         if (job.Saved) return HistoryStatus.Delivered;
-        if (job.Error != null || job.State is "準備中斷，請重新選取來源傳送" or "朋友權限已撤銷") return HistoryStatus.Attention;
+        if (job.Error != null || job.State is TransferJob.PreparationInterrupted or TransferJob.PreparationFailed or
+            TransferJob.FriendAccessRevoked or TransferJob.ShareMissing or TransferJob.SaveFailed or TransferJob.SaveInterrupted or TransferJob.SaveRejected)
+            return HistoryStatus.Attention;
         if (job.CanSave) return HistoryStatus.AwaitingSave;
         if (job.Detached || job.Paused) return HistoryStatus.Stopped;
-        return job.Kind == "send" && job.State == TransferJob.SenderSynced ? HistoryStatus.Delivered : HistoryStatus.Active;
+        return job.HasConfirmedPeerSync ? HistoryStatus.Delivered : HistoryStatus.Active;
     }
 
     public static HistoryDirection DirectionOf(TransferJob job) => job.Kind switch

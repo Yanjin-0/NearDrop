@@ -51,12 +51,26 @@ foreach ($arg in @('--profile', $profile, '--local-test')) { $start.ArgumentList
 # These display fixtures share neither a real path nor a real device with the test engine.
 New-Item -Path $profile -ItemType Directory | Out-Null
 $jobs = @(
-    @{Id='nd-once-11111111111111111111111111111111'; Kind='receive'; Label='驗收樣本待保存'; FriendName='測試朋友'; State='已接收 · 等待獨立保存'; TotalBytes=1024; DoneBytes=1024; Path=(Join-Path $profile 'fixture-pending')},
-    @{Id='nd-once-22222222222222222222222222222222'; Kind='receive'; Label='驗收樣本已保存'; FriendName='測試朋友'; State='已獨立保存'; Saved=$true; Detached=$true; TotalBytes=1024; DoneBytes=1024; Path=(Join-Path $profile 'fixture-completed'); SavedPath=(Join-Path $profile 'fixture-saved')}
+    @{Id='nd-once-11111111111111111111111111111111'; Kind='receive'; Label='驗收樣本待重試保存'; FriendName='測試朋友'; State='獨立保存中斷 · 可重試'; Detached=$true; Path=(Join-Path $profile 'fixture-pending'); SavedPath=(Join-Path $profile 'fixture-retry')},
+    @{Id='nd-once-22222222222222222222222222222222'; Kind='receive'; Label='驗收樣本已保存'; FriendName='測試朋友'; State='已獨立保存'; Saved=$true; Detached=$true; Path=(Join-Path $profile 'fixture-completed'); SavedPath=(Join-Path $profile 'fixture-saved')},
+    @{Id='nd-once-33333333333333333333333333333333'; Kind='receive'; Label='驗收樣本可停止'; FriendName='測試朋友'; State='等待與對方裝置連線'; Path=(Join-Path $profile 'fixture-stoppable')}
 )
 @{Version=1; Jobs=$jobs} | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $profile 'state.json') -Encoding utf8
+$start.ArgumentList.Add('--background')
 $app = [Diagnostics.Process]::Start($start)
 try {
+    $desktopLock = Join-Path $profile 'desktop.lock'
+    for ($attempt = 0; $attempt -lt 30 -and !(Test-Path -LiteralPath $desktopLock); $attempt++) { Start-Sleep -Milliseconds 300 }
+    if (!(Test-Path -LiteralPath $desktopLock)) { throw 'Background app did not acquire its profile.' }
+    $duplicate = [Diagnostics.Process]::Start($start)
+    if (!$duplicate.WaitForExit(8000) -or $duplicate.ExitCode -ne 0) { throw 'Duplicate background launch did not exit.' }
+    Start-Sleep -Milliseconds 400
+    $app.Refresh()
+    if ($app.HasExited -or $app.MainWindowHandle -ne [IntPtr]::Zero) { throw 'Duplicate background launch opened a window.' }
+    $start.ArgumentList.Remove('--background') | Out-Null
+    $foreground = [Diagnostics.Process]::Start($start)
+    if (!$foreground.WaitForExit(8000) -or $foreground.ExitCode -ne 0) { throw 'Foreground launch did not activate the existing instance.' }
+    Write-Output 'PASS duplicate background launch remains hidden, foreground launch reuses the app'
     & winapp ui wait-for MyId -a $app.Id --timeout 15000 | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'No app window or MyId automation element.' }
     $id = ''
@@ -93,8 +107,12 @@ try {
     Forward-Fixture $first
     & winapp ui wait-for SelectionSummary -a $app.Id --property Name --value '2 個項目' --contains --timeout 5000
     if ($LASTEXITCODE -ne 0) { throw 'Selection did not append or exclude duplicates.' }
+    Forward-Fixture (Join-Path $run '已失效的來源.txt')
+    Assert-UiProperty Notice Name '有 1 個項目無法加入。已加入 0 個，原有清單保留。' $app.Id
     & winapp ui screenshot -a $app.Id -o (Join-Path $run 'draft.png')
     & winapp ui invoke '驗收樣本甲.txt' --type ListItem -a $app.Id
+    $displayedPath = (& winapp ui get-value DraftLocalPath -a $app.Id | Out-String).Trim() -replace '[\r\n]', ''
+    if ($LASTEXITCODE -ne 0 -or $displayedPath -ne $first) { throw 'Draft source path did not match the selection.' }
     & winapp ui invoke RemoveDraftButton -a $app.Id
     & winapp ui wait-for SelectionSummary -a $app.Id --property Name --value '1 個項目' --contains --timeout 5000
     if ($LASTEXITCODE -ne 0) { throw 'Selected item was not removed.' }
@@ -111,15 +129,20 @@ try {
     & winapp ui invoke '設定' --type TabItem -a $app.Id
     & winapp ui invoke ExplorerHotkey -a $app.Id
     if ($LASTEXITCODE -ne 0) { throw 'Could not enable the Explorer shortcut.' }
-    & winapp ui wait-for Notice -a $app.Id --property Name --value '已啟用 Ctrl+Alt+N' --contains --timeout 5000
+    & winapp ui wait-for Notice -a $app.Id --property Name --value 'Ctrl+Alt+N 已啟用' --contains --timeout 5000
     if ($LASTEXITCODE -ne 0) { throw 'Explorer shortcut did not register.' }
+    & winapp ui send-keys 'ctrl+alt+n' --target SettingsTab -a $app.Id --via send-input
+    if ($LASTEXITCODE -ne 0) { throw 'Could not invoke the Explorer shortcut.' }
+    & winapp ui wait-for Notice -a $app.Id --property Name --value '請先在檔案總管選取' --contains --timeout 5000
+    if ($LASTEXITCODE -ne 0) { throw 'The shortcut failure did not show its send-page notice.' }
+    Write-Output 'PASS Explorer shortcut shows the send-page guidance when nothing can be imported'
     & winapp ui invoke ReceiveTab -a $app.Id
     & winapp ui wait-for Notice -a $app.Id --gone --timeout 5000 | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Settings message leaked onto the receive page.' }
     & winapp ui wait-for AcceptButton -a $app.Id --gone --timeout 5000 | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Accept was visible without an incoming offer.' }
     Assert-UiProperty ReceiveTab Name '接收（1）' $app.Id
-    Assert-UiProperty IncomingSummary Name '0 筆待接受 · 1 筆待保存' $app.Id
+    Assert-UiProperty IncomingSummary Name '0 筆待接受 · 0 筆待保存 · 1 筆待重試保存' $app.Id
     & winapp ui invoke NextIncomingButton -a $app.Id
     if ($LASTEXITCODE -ne 0) { throw 'Could not open the next actionable receipt.' }
     Assert-UiProperty SaveButton IsEnabled true $app.Id
@@ -129,7 +152,7 @@ try {
         throw 'Only the pending-save fixture should be announced.'
     }
     Write-Output 'PASS receiving badge, actionable navigation, and persistent announcement tracking'
-    & winapp ui invoke '驗收樣本待保存' --type ListItem -a $app.Id
+    & winapp ui invoke '驗收樣本待重試保存' --type ListItem -a $app.Id
     if ($LASTEXITCODE -ne 0) { throw 'Could not select the pending-save fixture.' }
     Assert-UiProperty SaveButton IsEnabled true $app.Id
     & winapp ui invoke '驗收樣本已保存' --type ListItem -a $app.Id
@@ -139,7 +162,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Save was visible on an already saved item.' }
     & winapp ui screenshot -a $app.Id -o (Join-Path $run 'receive.png')
     & winapp ui invoke HistoryTab -a $app.Id
-    & winapp ui invoke '驗收樣本待保存' --type ListItem -a $app.Id
+    & winapp ui invoke '驗收樣本可停止' --type ListItem -a $app.Id
     Assert-UiProperty StopTransferButton Name '停止這次接收' $app.Id
     & winapp ui invoke StopTransferButton -a $app.Id
     if ($LASTEXITCODE -ne 0) { throw 'Could not open the stop-transfer confirmation.' }
@@ -155,8 +178,20 @@ try {
     Write-Output 'PASS stopping an active transfer requires confirmation and declining preserves it'
     & winapp ui invoke SettingsTab -a $app.Id
     Write-Output 'PASS page notices are isolated and receive actions match the selected state'
+    $settingsLock = [IO.File]::Open($settingsFile + '.new', 'Create', 'ReadWrite', 'None')
+    try {
+        & winapp ui invoke ReceiveNotifications -a $app.Id
+        if ($LASTEXITCODE -ne 0) { throw 'Could not attempt locked notification setting.' }
+        & winapp ui wait-for Notice -a $app.Id --property Name --value '無法儲存設定，仍使用原本的設定。' --contains --timeout 5000
+        if ($LASTEXITCODE -ne 0) { throw 'Failed settings write did not show rollback notice.' }
+        if (!(Get-Content -LiteralPath $settingsFile -Raw | ConvertFrom-Json).ReceiveNotifications) {
+            throw 'Locked preference unexpectedly changed on disk.'
+        }
+    }
+    finally { $settingsLock.Dispose() }
     & winapp ui invoke ReceiveNotifications -a $app.Id
     Assert-UiProperty Notice Name '已關閉收件通知。待處理項目仍顯示在接收頁。' $app.Id
+    Write-Output 'PASS failed notification setting write restores the checkbox and allows a retry'
     & winapp ui invoke ReceiveTab -a $app.Id
     Assert-UiProperty ReceiveTab Name '接收（1）' $app.Id
     & winapp ui invoke SettingsTab -a $app.Id
@@ -166,7 +201,7 @@ try {
     & winapp ui wait-for MyId -a $app.Id --timeout 15000 | Out-Null
     Assert-UiProperty MyId IsEnabled true $app.Id
     & winapp ui invoke SettingsTab -a $app.Id
-    & winapp ui wait-for Notice -a $app.Id --property Name --value '已啟用 Ctrl+Alt+N' --contains --timeout 15000
+    & winapp ui wait-for Notice -a $app.Id --property Name --value 'Ctrl+Alt+N 已啟用' --contains --timeout 15000
     if ($LASTEXITCODE -ne 0) { throw 'Explorer shortcut was not restored after restart.' }
     Write-Output 'PASS Explorer shortcut preference is restored and registers after restart'
     if ((Get-Content -LiteralPath $settingsFile -Raw | ConvertFrom-Json).ReceiveNotifications -ne $false) { throw 'Notification preference was lost.' }
